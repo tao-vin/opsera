@@ -4,8 +4,9 @@ A minimal SSH/SFTP operations bridge for AI coding agents, VPNs, bastion hosts, 
 
 Opsera is a local Windows operations bridge for AI-assisted server management.
 
-It helps tools like Codex, Claude Code, and other local AI agents operate remote servers through a controlled local tunnel,
-without requiring you to paste raw server credentials directly into the agent chat or runtime.
+It helps tools like Claude Code, OpenClaw, Codex, OpenCode, Gemini CLI, and other local AI agents operate remote servers
+through a controlled local tunnel, without requiring you to paste raw server credentials directly into the agent chat or
+runtime.
 
 Opsera is especially useful when servers are behind VPNs, bastion hosts, jump hosts, or internal networks where direct
 public SSH access is not available.
@@ -46,6 +47,19 @@ Opsera provides:
 The goal is not to replace every feature of mature SSH clients.
 
 The goal is to provide a focused bridge between local AI agents and remote server operations.
+
+## Supported Agents
+
+Opsera is designed for local coding agents and command-line AI tools that can run local commands or call packaged tools.
+
+Common agents and CLIs include:
+
+- Claude Code
+- OpenClaw
+- Codex
+- OpenCode
+- Gemini CLI
+- Other local AI coding agents that can invoke CLI tools
 
 ## Typical Use Cases
 
