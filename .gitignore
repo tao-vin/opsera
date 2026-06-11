@@ -9,6 +9,10 @@ opsera.exe
 dist/
 build/
 bin/
+!skills/
+!skills/opsera/
+!skills/opsera/bin/
+!skills/opsera/bin/.gitkeep
 .gocache/
 
 .idea/

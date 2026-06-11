@@ -156,6 +156,18 @@ Possible future improvements:
 If you are using AI coding agents for infrastructure work, VPN environments, bastion hosts, or internal server deployment
 workflows, feedback is especially useful.
 
+## Codex Skill
+
+The Codex skill lives in `skills/opsera`.
+
+Package it after building `opsera.exe`:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\package-skill.ps1
+```
+
+The script copies `opsera.exe` into `skills/opsera/bin/` and writes `dist/opsera-skill.zip`.
+
 ## Disclaimer
 
 Opsera can execute commands and transfer files on remote servers.
