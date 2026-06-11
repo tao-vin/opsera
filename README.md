@@ -180,7 +180,7 @@ Package it after building `opsera.exe`:
 powershell.exe -ExecutionPolicy Bypass -File scripts\package-skill.ps1
 ```
 
-The script copies `opsera.exe` into `skills/opsera/bin/` and writes `dist/opsera-skill.zip`.
+The script copies `opsera.exe` into `skills/opsera/bin/` and writes `D:\release\opsera-skill.zip`.
 
 ## Disclaimer
 
