@@ -1,0 +1,17 @@
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+opsera.exe
+
+dist/
+build/
+bin/
+.gocache/
+
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
