@@ -22,7 +22,11 @@ try {
   if (-not (Test-Path $go)) {
     throw 'Go toolchain not found. Install Go or add go.exe to PATH.'
   }
-  & $go build -ldflags "-H windowsgui" -o $exePath .\cmd\opsera
+  & $go build -trimpath -ldflags "-s -w -H windowsgui" -o $exePath .\cmd\opsera
+  $upx = Get-Command upx.exe -ErrorAction SilentlyContinue
+  if ($upx) {
+    & $upx.Source --best --lzma $exePath
+  }
 } finally {
   Pop-Location
 }

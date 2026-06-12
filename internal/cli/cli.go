@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +20,8 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/tao-vin/opsera/internal/config"
+	"github.com/tao-vin/opsera/internal/crypto"
 	"github.com/tao-vin/opsera/internal/events"
 	"github.com/tao-vin/opsera/internal/logs"
 	"github.com/tao-vin/opsera/internal/model"
@@ -37,13 +41,23 @@ func TryRun(args []string) (bool, error) {
 		return false, nil
 	}
 	if len(args) < 3 || args[1] != "run" {
-		return true, errors.New("usage: opsera command run [--xsh <path>] <shell-command>")
+		return true, errors.New("usage: opsera command run [--server <name|host|id>] [--xsh <path>] <shell-command>")
 	}
+	serverRef := ""
 	xshPath := ""
 	commandArgs := args[2:]
-	if len(commandArgs) >= 2 && commandArgs[0] == "--xsh" {
-		xshPath = commandArgs[1]
-		commandArgs = commandArgs[2:]
+	for len(commandArgs) >= 2 {
+		if commandArgs[0] == "--server" {
+			serverRef = commandArgs[1]
+			commandArgs = commandArgs[2:]
+			continue
+		}
+		if commandArgs[0] == "--xsh" {
+			xshPath = commandArgs[1]
+			commandArgs = commandArgs[2:]
+			continue
+		}
+		break
 	}
 	command := strings.TrimSpace(strings.Join(commandArgs, " "))
 	if command == "" {
@@ -63,7 +77,17 @@ func TryRun(args []string) (bool, error) {
 		CreatedAt: time.Now().Format(time.RFC3339),
 		UpdatedAt: time.Now().Format(time.RFC3339),
 	}
-	output, runErr := RunCommand(xshPath, command)
+	var output string
+	var runErr error
+	if strings.TrimSpace(serverRef) != "" {
+		if apiItem, err := runServerCommandViaAPI(serverRef, command); err == nil {
+			_ = logStore.Append(model.LogLevelInfo, "command", "done via opsera api: "+command, apiItem.ID)
+			return true, json.NewEncoder(os.Stdout).Encode(apiItem)
+		}
+		output, runErr = RunServerCommand(serverRef, command)
+	} else {
+		output, runErr = RunCommand(xshPath, command)
+	}
 	item.Output = output
 	if runErr != nil {
 		item.Status = model.CommandStatusFailed
@@ -109,12 +133,104 @@ func RunCommand(xshPath string, command string) (string, error) {
 	return string(out), err
 }
 
+func RunServerCommand(serverRef string, command string) (string, error) {
+	session, err := serverSession(serverRef)
+	if err != nil {
+		return "", err
+	}
+	client, err := dialSession(session)
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
+	return remoteRun(client, command)
+}
+
+func runServerCommandViaAPI(serverRef string, command string) (model.Command, error) {
+	body, err := json.Marshal(map[string]string{
+		"server":  serverRef,
+		"command": command,
+	})
+	if err != nil {
+		return model.Command{}, err
+	}
+	client := http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Post("http://127.0.0.1:18741/command/run", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return model.Command{}, err
+	}
+	defer resp.Body.Close()
+	var item model.Command
+	if err := json.NewDecoder(resp.Body).Decode(&item); err != nil {
+		return model.Command{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return item, fmt.Errorf("opsera api returned %s", resp.Status)
+	}
+	if item.Status == model.CommandStatusFailed {
+		return item, errors.New(item.Error)
+	}
+	return item, nil
+}
+
 func OpenKeepAlive(xshPath string) (*ssh.Client, error) {
 	session, err := LatestSession(xshPath)
 	if err != nil {
 		return nil, err
 	}
 	return dialSession(session)
+}
+
+func serverSession(serverRef string) (xsh.Session, error) {
+	dataDir, err := resolveDataDir()
+	if err != nil {
+		return xsh.Session{}, err
+	}
+	store, err := config.NewStore(filepath.Join(dataDir, "config"))
+	if err != nil {
+		return xsh.Session{}, err
+	}
+	ref := strings.ToLower(strings.TrimSpace(serverRef))
+	var server model.Server
+	for _, item := range store.Snapshot().Servers {
+		if strings.ToLower(item.ID) == ref ||
+			strings.ToLower(item.Name) == ref ||
+			strings.ToLower(item.Host) == ref ||
+			strings.Contains(strings.ToLower(item.Name), ref) {
+			server = item
+			break
+		}
+	}
+	if server.ID == "" {
+		return xsh.Session{}, fmt.Errorf("server not found: %s", serverRef)
+	}
+	if server.Mode != "" && server.Mode != model.ConnectionModeDirectSSH {
+		return xsh.Session{}, fmt.Errorf("server %s is not a direct SSH server", server.Name)
+	}
+	var credential model.Credential
+	for _, item := range store.Snapshot().Credentials {
+		if item.ID == server.CredentialRef {
+			credential = item
+			break
+		}
+	}
+	if credential.ID == "" {
+		return xsh.Session{}, fmt.Errorf("credential not found for server: %s", server.Name)
+	}
+	password, err := crypto.NewVault(dataDir).Decrypt(credential.SecretCipher)
+	if err != nil {
+		return xsh.Session{}, err
+	}
+	port := server.Port
+	if port <= 0 {
+		port = 22
+	}
+	return xsh.Session{
+		Host:     server.Host,
+		Port:     port,
+		UserName: credential.Username,
+		Password: password,
+	}, nil
 }
 
 func dialSession(session xsh.Session) (*ssh.Client, error) {
@@ -162,23 +278,38 @@ func runFile(args []string) (bool, error) {
 		return runDownload(args[1:])
 	}
 	if args[0] != "upload" {
-		return true, errors.New("usage: opsera file upload [--xsh <path>] <local> <remote>")
+		return true, errors.New("usage: opsera file upload [--server <name|host|id>] [--xsh <path>] <local> <remote>")
 	}
+	serverRef := ""
 	xshPath := ""
 	fileArgs := args[1:]
-	if len(fileArgs) >= 2 && fileArgs[0] == "--xsh" {
-		xshPath = fileArgs[1]
-		fileArgs = fileArgs[2:]
+	for len(fileArgs) >= 2 {
+		if fileArgs[0] == "--server" {
+			serverRef = fileArgs[1]
+			fileArgs = fileArgs[2:]
+			continue
+		}
+		if fileArgs[0] == "--xsh" {
+			xshPath = fileArgs[1]
+			fileArgs = fileArgs[2:]
+			continue
+		}
+		break
 	}
 	if len(fileArgs) != 2 {
-		return true, errors.New("usage: opsera file upload [--xsh <path>] <local> <remote>")
+		return true, errors.New("usage: opsera file upload [--server <name|host|id>] [--xsh <path>] <local> <remote>")
 	}
 	result := map[string]any{
 		"local":  fileArgs[0],
 		"remote": fileArgs[1],
 	}
 	dataDir, _ := resolveDataDir()
-	err := uploadFile(xshPath, fileArgs[0], fileArgs[1])
+	var err error
+	if strings.TrimSpace(serverRef) != "" {
+		err = uploadServerFile(serverRef, fileArgs[0], fileArgs[1])
+	} else {
+		err = uploadFile(xshPath, fileArgs[0], fileArgs[1])
+	}
 	if err != nil {
 		result["status"] = "failed"
 		result["error"] = err.Error()
@@ -283,6 +414,18 @@ func uploadFile(xshPath, localPath, remotePath string) error {
 	if err != nil {
 		return err
 	}
+	return uploadSessionFile(session, localPath, remotePath)
+}
+
+func uploadServerFile(serverRef, localPath, remotePath string) error {
+	session, err := serverSession(serverRef)
+	if err != nil {
+		return err
+	}
+	return uploadSessionFile(session, localPath, remotePath)
+}
+
+func uploadSessionFile(session xsh.Session, localPath, remotePath string) error {
 	client, err := dialSession(session)
 	if err != nil {
 		return err

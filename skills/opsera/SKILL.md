@@ -7,6 +7,11 @@ description: Use the bundled Opsera executable as the Xshell replacement for VPN
 
 Opsera is self-contained in this skill directory.
 
+Source and downloads:
+
+- GitHub: https://github.com/tao-vin/opsera
+- Releases / latest exe: https://github.com/tao-vin/opsera/releases
+
 Executable:
 
 ```powershell

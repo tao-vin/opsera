@@ -2,14 +2,17 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/tao-vin/opsera/internal/config"
 	"github.com/tao-vin/opsera/internal/crypto"
 	"github.com/tao-vin/opsera/internal/logs"
 	"github.com/tao-vin/opsera/internal/model"
 	"github.com/tao-vin/opsera/internal/session"
+	"github.com/tao-vin/opsera/internal/sshpool"
 )
 
 type Server struct {
@@ -18,11 +21,12 @@ type Server struct {
 	vault    *crypto.Vault
 	sessions *session.Manager
 	commands *session.CommandQueue
+	sshPool  *sshpool.Pool
 	onLaunch func([]string)
 }
 
-func New(store *config.Store, logStore *logs.Store, vault *crypto.Vault, sessions *session.Manager, commands *session.CommandQueue, onLaunch func([]string)) *Server {
-	return &Server{store: store, logs: logStore, vault: vault, sessions: sessions, commands: commands, onLaunch: onLaunch}
+func New(store *config.Store, logStore *logs.Store, vault *crypto.Vault, sessions *session.Manager, commands *session.CommandQueue, sshPool *sshpool.Pool, onLaunch func([]string)) *Server {
+	return &Server{store: store, logs: logStore, vault: vault, sessions: sessions, commands: commands, sshPool: sshPool, onLaunch: onLaunch}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -34,6 +38,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/launch", s.handleLaunch)
 	mux.HandleFunc("/session/command", s.handleSessionCommand)
 	mux.HandleFunc("/session/commands", s.handleSessionCommands)
+	mux.HandleFunc("/command/run", s.handleCommandRun)
 	mux.HandleFunc("/logs", s.handleLogs)
 	return mux
 }
@@ -218,4 +223,48 @@ func (s *Server) handleSessionCommands(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = json.NewEncoder(w).Encode(s.commands.List())
+}
+
+func (s *Server) handleCommandRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Server  string `json:"server"`
+		Command string `json:"command"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Server = strings.TrimSpace(req.Server)
+	req.Command = strings.TrimSpace(req.Command)
+	if req.Server == "" || req.Command == "" {
+		http.Error(w, "server and command are required", http.StatusBadRequest)
+		return
+	}
+	item := model.Command{
+		ID:        fmt.Sprintf("cmd-%d", time.Now().UnixNano()),
+		Command:   req.Command,
+		Target:    req.Server,
+		CreatedAt: nowRFC3339(),
+		UpdatedAt: nowRFC3339(),
+	}
+	output, err := s.sshPool.Run(req.Server, req.Command)
+	item.Output = output
+	if err != nil {
+		item.Status = model.CommandStatusFailed
+		item.Error = err.Error()
+		_ = s.logs.Append(model.LogLevelError, "command", "failed: "+req.Server+": "+req.Command+": "+err.Error(), item.ID)
+		_ = json.NewEncoder(w).Encode(item)
+		return
+	}
+	item.Status = model.CommandStatusDone
+	_ = s.logs.Append(model.LogLevelInfo, "command", "done: "+req.Server+": "+req.Command, item.ID)
+	_ = json.NewEncoder(w).Encode(item)
+}
+
+func nowRFC3339() string {
+	return time.Now().Format(time.RFC3339)
 }

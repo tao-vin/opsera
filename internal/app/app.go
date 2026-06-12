@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"image/color"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +34,7 @@ import (
 	"github.com/tao-vin/opsera/internal/logs"
 	"github.com/tao-vin/opsera/internal/model"
 	"github.com/tao-vin/opsera/internal/session"
+	"github.com/tao-vin/opsera/internal/sshpool"
 )
 
 type runtime struct {
@@ -40,10 +43,22 @@ type runtime struct {
 	vault      *crypto.Vault
 	sessions   *session.Manager
 	commands   *session.CommandQueue
+	sshPool    *sshpool.Pool
 	httpServer *http.Server
 	dataDir    string
+	identity   localIdentity
+	relayHost  string
 	keepersMu  sync.Mutex
 	keepers    []io.Closer
+}
+
+type localIdentity struct {
+	MachineCode string `json:"machineCode"`
+	Password    string `json:"password"`
+}
+
+type relayConfig struct {
+	Host string `json:"host"`
 }
 
 type uiState struct {
@@ -68,13 +83,17 @@ type uiState struct {
 	confirmDelete  bool
 	pendingDelete  int
 
-	name     widget.Editor
-	address  widget.Editor
-	username widget.Editor
-	password widget.Editor
+	name        widget.Editor
+	address     widget.Editor
+	port        widget.Editor
+	username    widget.Editor
+	password    widget.Editor
+	machineType model.MachineType
 
 	addBtn            widget.Clickable
 	saveBtn           widget.Clickable
+	linuxModeBtn      widget.Clickable
+	windowsModeBtn    widget.Clickable
 	serversTab        widget.Clickable
 	logsTab           widget.Clickable
 	terminalTabClicks []widget.Clickable
@@ -110,14 +129,25 @@ func Run() error {
 	if err != nil {
 		return err
 	}
+	identity, err := loadLocalIdentity(dataDir)
+	if err != nil {
+		return err
+	}
+	relayConfig, err := loadRelayConfig(dataDir)
+	if err != nil {
+		return err
+	}
 	rt := &runtime{
-		store:    store,
-		logStore: logStore,
-		vault:    crypto.NewVault(dataDir),
-		dataDir:  dataDir,
+		store:     store,
+		logStore:  logStore,
+		vault:     crypto.NewVault(dataDir),
+		dataDir:   dataDir,
+		identity:  identity,
+		relayHost: relayConfig.Host,
 	}
 	rt.sessions = session.NewManager(store, logStore)
 	rt.commands = session.NewCommandQueue(logStore)
+	rt.sshPool = sshpool.New(store, rt.vault, logStore)
 	if err := rt.startAPI(); err != nil {
 		return err
 	}
@@ -138,6 +168,9 @@ func Run() error {
 		defer cancel()
 		_ = rt.httpServer.Shutdown(ctx)
 	}
+	if rt.sshPool != nil {
+		rt.sshPool.CloseAll()
+	}
 	select {
 	case err := <-errCh:
 		return err
@@ -147,7 +180,7 @@ func Run() error {
 }
 
 func (r *runtime) startAPI() error {
-	server := api.New(r.store, r.logStore, r.vault, r.sessions, r.commands, r.handleForwardedLaunch)
+	server := api.New(r.store, r.logStore, r.vault, r.sessions, r.commands, r.sshPool, r.handleForwardedLaunch)
 	r.httpServer = &http.Server{
 		Addr:    "127.0.0.1:18741",
 		Handler: server.Handler(),
@@ -292,14 +325,15 @@ func newUIState(rt *runtime) *uiState {
 		editing:        false,
 		tab:            "servers",
 		status:         "Ready",
+		machineType:    model.MachineTypeLinux,
 		seenEvents:     map[string]bool{},
 		startedAt:      time.Now(),
 	}
 	ui.name.SingleLine = true
 	ui.address.SingleLine = true
+	ui.port.SingleLine = true
 	ui.username.SingleLine = true
 	ui.password.SingleLine = true
-	ui.password.Mask = '*'
 	ui.reload()
 	return ui
 }
@@ -390,6 +424,14 @@ func (ui *uiState) handle(gtx layout.Context) {
 	}
 	for ui.saveBtn.Clicked(gtx) {
 		ui.save()
+	}
+	for ui.linuxModeBtn.Clicked(gtx) {
+		ui.machineType = model.MachineTypeLinux
+		ui.status = "Linux SSH mode"
+	}
+	for ui.windowsModeBtn.Clicked(gtx) {
+		ui.machineType = model.MachineTypeWindows
+		ui.status = "Windows relay mode"
 	}
 	for ui.confirmDeleteBtn.Clicked(gtx) {
 		ui.selectedServer = ui.pendingDelete
@@ -532,7 +574,7 @@ func (ui *uiState) selectServerByTarget(target string) {
 }
 
 func (ui *uiState) layout(gtx layout.Context) layout.Dimensions {
-	fill(gtx, color.NRGBA{R: 247, G: 248, B: 250, A: 255})
+	fill(gtx, color.NRGBA{R: 14, G: 15, B: 18, A: 255})
 	dims := layout.UniformInset(unit.Dp(18)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -642,9 +684,9 @@ func (ui *uiState) serverList(gtx layout.Context) layout.Dimensions {
 
 func (ui *uiState) serverRow(gtx layout.Context, idx int) layout.Dimensions {
 	server := ui.servers[idx]
-	bg := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	bg := color.NRGBA{R: 24, G: 25, B: 28, A: 255}
 	if idx == ui.selectedServer {
-		bg = color.NRGBA{R: 224, G: 234, B: 247, A: 255}
+		bg = color.NRGBA{R: 42, G: 45, B: 51, A: 255}
 	}
 	return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -657,12 +699,12 @@ func (ui *uiState) serverRow(gtx layout.Context, idx int) layout.Dimensions {
 									return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 											label := material.Body1(ui.th, server.Name)
-											label.Color = color.NRGBA{R: 28, G: 32, B: 42, A: 255}
+											label.Color = color.NRGBA{R: 232, G: 234, B: 237, A: 255}
 											return label.Layout(gtx)
 										}),
 										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											label := material.Caption(ui.th, server.Host)
-											label.Color = color.NRGBA{R: 91, G: 99, B: 114, A: 255}
+											label := material.Caption(ui.th, serverSubtitle(server))
+											label.Color = color.NRGBA{R: 143, G: 149, B: 160, A: 255}
 											return label.Layout(gtx)
 										}),
 									)
@@ -670,15 +712,15 @@ func (ui *uiState) serverRow(gtx layout.Context, idx int) layout.Dimensions {
 							}),
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 								btn := material.Button(ui.th, &ui.rowEditClicks[idx], "Edit")
-								btn.Background = color.NRGBA{R: 232, G: 236, B: 243, A: 255}
-								btn.Color = color.NRGBA{R: 73, G: 81, B: 96, A: 255}
+								btn.Background = color.NRGBA{R: 48, G: 51, B: 58, A: 255}
+								btn.Color = color.NRGBA{R: 213, G: 216, B: 222, A: 255}
 								return btn.Layout(gtx)
 							}),
 							layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 								btn := material.Button(ui.th, &ui.rowDeleteClicks[idx], "x")
-								btn.Background = color.NRGBA{R: 232, G: 236, B: 243, A: 255}
-								btn.Color = color.NRGBA{R: 73, G: 81, B: 96, A: 255}
+								btn.Background = color.NRGBA{R: 48, G: 51, B: 58, A: 255}
+								btn.Color = color.NRGBA{R: 213, G: 216, B: 222, A: 255}
 								return btn.Layout(gtx)
 							}),
 						)
@@ -719,13 +761,38 @@ func (ui *uiState) inlineDeleteConfirm(gtx layout.Context, name string) layout.D
 func (ui *uiState) editor(gtx layout.Context) layout.Dimensions {
 	return panel(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.UniformInset(unit.Dp(16)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			addressLabel := "Address"
+			passwordLabel := "Password"
+			if ui.machineType == model.MachineTypeWindows {
+				addressLabel = "Machine code"
+				passwordLabel = "Fixed password"
+			}
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(sectionTitle(ui.th, "Server")),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(modeButton(ui.th, &ui.linuxModeBtn, "Linux", ui.machineType != model.MachineTypeWindows)),
+						layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+						layout.Rigid(modeButton(ui.th, &ui.windowsModeBtn, "Windows", ui.machineType == model.MachineTypeWindows)),
+					)
+				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(14)}.Layout),
 				layout.Rigid(ui.field("Name", &ui.name)),
-				layout.Rigid(ui.field("Address", &ui.address)),
-				layout.Rigid(ui.field("Username", &ui.username)),
-				layout.Rigid(ui.field("Password", &ui.password)),
+				layout.Rigid(ui.field(addressLabel, &ui.address)),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if ui.machineType == model.MachineTypeWindows {
+						return layout.Dimensions{}
+					}
+					return ui.field("Port", &ui.port)(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if ui.machineType == model.MachineTypeWindows {
+						return layout.Dimensions{}
+					}
+					return ui.field("Username", &ui.username)(gtx)
+				}),
+				layout.Rigid(ui.field(passwordLabel, &ui.password)),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(14)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return material.Button(ui.th, &ui.saveBtn, "Save").Layout(gtx)
@@ -835,9 +902,14 @@ func (ui *uiState) runCommand(text string) {
 }
 
 func (ui *uiState) statusBar(gtx layout.Context) layout.Dimensions {
+	relayHost := ui.rt.relayHost
+	if strings.TrimSpace(relayHost) == "" {
+		relayHost = "not configured"
+	}
+	identity := fmt.Sprintf("Relay %s  Code %s  Password %s", relayHost, ui.rt.identity.MachineCode, ui.rt.identity.Password)
 	return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 		layout.Flexed(1, muted(ui.th, ui.status)),
-		layout.Rigid(muted(ui.th, "127.0.0.1:18741")),
+		layout.Rigid(muted(ui.th, identity)),
 	)
 }
 
@@ -851,7 +923,14 @@ func (ui *uiState) field(labelText string, editor *widget.Editor) layout.Widget 
 					return label.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return material.Editor(ui.th, editor, "").Layout(gtx)
+					return surface(gtx, color.NRGBA{R: 14, G: 15, B: 18, A: 255}, func(gtx layout.Context) layout.Dimensions {
+						return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							ed := material.Editor(ui.th, editor, "")
+							ed.Color = color.NRGBA{R: 232, G: 234, B: 237, A: 255}
+							ed.HintColor = color.NRGBA{R: 110, G: 116, B: 128, A: 255}
+							return ed.Layout(gtx)
+						})
+					})
 				}),
 			)
 		})
@@ -861,21 +940,45 @@ func (ui *uiState) field(labelText string, editor *widget.Editor) layout.Widget 
 func (ui *uiState) clearForm() {
 	ui.selectedServer = -1
 	ui.editing = true
+	ui.machineType = model.MachineTypeLinux
 	ui.name.SetText("")
 	ui.address.SetText("")
+	ui.port.SetText("22")
 	ui.username.SetText("")
 	ui.password.SetText("")
 	ui.status = "New server"
 }
 
 func (ui *uiState) load(server model.Server) {
+	ui.machineType = server.MachineType
+	if ui.machineType == "" {
+		ui.machineType = model.MachineTypeLinux
+	}
 	ui.name.SetText(server.Name)
-	ui.address.SetText(server.Host)
+	if ui.machineType == model.MachineTypeWindows {
+		ui.address.SetText(server.MachineCode)
+		ui.port.SetText("")
+	} else {
+		ui.address.SetText(server.Host)
+		if server.Port > 0 {
+			ui.port.SetText(strconv.Itoa(server.Port))
+		} else {
+			ui.port.SetText("22")
+		}
+	}
 	ui.password.SetText("")
 	ui.username.SetText("")
 	for _, credential := range ui.credentials {
 		if credential.ID == server.CredentialRef {
 			ui.username.SetText(credential.Username)
+			if credential.SecretCipher != "" {
+				plain, err := ui.rt.vault.Decrypt(credential.SecretCipher)
+				if err != nil {
+					ui.status = "Could not decrypt password: " + err.Error()
+				} else {
+					ui.password.SetText(plain)
+				}
+			}
 			break
 		}
 	}
@@ -884,11 +987,32 @@ func (ui *uiState) load(server model.Server) {
 func (ui *uiState) save() {
 	name := strings.TrimSpace(ui.name.Text())
 	address := strings.TrimSpace(ui.address.Text())
+	portText := strings.TrimSpace(ui.port.Text())
 	username := strings.TrimSpace(ui.username.Text())
 	password := ui.password.Text()
-	if name == "" || address == "" || username == "" {
-		ui.status = "Name, address and username are required"
-		return
+	port := 22
+	if ui.machineType == "" {
+		ui.machineType = model.MachineTypeLinux
+	}
+	if ui.machineType == model.MachineTypeWindows {
+		if name == "" || address == "" {
+			ui.status = "Name and machine code are required"
+			return
+		}
+		username = address
+	} else {
+		if name == "" || address == "" || username == "" {
+			ui.status = "Name, address and username are required"
+			return
+		}
+		if portText != "" {
+			parsed, err := strconv.Atoi(portText)
+			if err != nil || parsed < 1 || parsed > 65535 {
+				ui.status = "Port must be between 1 and 65535"
+				return
+			}
+			port = parsed
+		}
 	}
 
 	serverID := ""
@@ -933,14 +1057,22 @@ func (ui *uiState) save() {
 		ui.status = err.Error()
 		return
 	}
-	if err := ui.rt.store.UpsertServer(model.Server{
+	server := model.Server{
 		ID:            serverID,
 		Name:          name,
 		Host:          address,
-		Port:          22,
-		Mode:          model.ConnectionModeDirectSSH,
 		CredentialRef: credentialID,
-	}); err != nil {
+		MachineType:   ui.machineType,
+	}
+	if ui.machineType == model.MachineTypeWindows {
+		server.Host = address
+		server.MachineCode = address
+		server.Mode = model.ConnectionModeRelayAgent
+	} else {
+		server.Port = port
+		server.Mode = model.ConnectionModeDirectSSH
+	}
+	if err := ui.rt.store.UpsertServer(server); err != nil {
 		ui.status = err.Error()
 		return
 	}
@@ -982,8 +1114,79 @@ func resolveDataDir() (string, error) {
 	return root, os.MkdirAll(root, 0o755)
 }
 
+func loadLocalIdentity(dataDir string) (localIdentity, error) {
+	path := filepath.Join(dataDir, "identity.json")
+	raw, err := os.ReadFile(path)
+	if err == nil && len(raw) > 0 {
+		var identity localIdentity
+		if err := json.Unmarshal(raw, &identity); err != nil {
+			return localIdentity{}, err
+		}
+		if strings.TrimSpace(identity.MachineCode) != "" && strings.TrimSpace(identity.Password) != "" {
+			return identity, nil
+		}
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return localIdentity{}, err
+	}
+	identity := localIdentity{
+		MachineCode: randomDigits(9),
+		Password:    randomDigits(6),
+	}
+	out, err := json.MarshalIndent(identity, "", "  ")
+	if err != nil {
+		return localIdentity{}, err
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		return localIdentity{}, err
+	}
+	return identity, nil
+}
+
+func loadRelayConfig(dataDir string) (relayConfig, error) {
+	host := strings.TrimSpace(os.Getenv("OPSERA_RELAY_HOST"))
+	if host != "" {
+		return relayConfig{Host: host}, nil
+	}
+	path := filepath.Join(dataDir, "relay-config.json")
+	raw, err := os.ReadFile(path)
+	if err == nil && len(raw) > 0 {
+		var config relayConfig
+		if err := json.Unmarshal(raw, &config); err != nil {
+			return relayConfig{}, err
+		}
+		config.Host = strings.TrimSpace(config.Host)
+		return config, nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return relayConfig{}, err
+	}
+	return relayConfig{}, nil
+}
+
+func randomDigits(length int) string {
+	if length <= 0 {
+		return ""
+	}
+	buf := make([]byte, length)
+	random := make([]byte, length)
+	if _, err := rand.Read(random); err != nil {
+		for i := range buf {
+			buf[i] = byte('0' + time.Now().UnixNano()%10)
+		}
+		return string(buf)
+	}
+	for i := range buf {
+		buf[i] = byte('0' + random[i]%10)
+	}
+	if length > 0 && buf[0] == '0' {
+		buf[0] = '1'
+	}
+	return string(buf)
+}
+
 func panel(gtx layout.Context, w layout.Widget) layout.Dimensions {
-	return surface(gtx, color.NRGBA{R: 255, G: 255, B: 255, A: 255}, w)
+	return surface(gtx, color.NRGBA{R: 21, G: 22, B: 26, A: 255}, w)
 }
 
 func terminalPanel(gtx layout.Context, w layout.Widget) layout.Dimensions {
@@ -1006,7 +1209,7 @@ func fill(gtx layout.Context, c color.NRGBA) {
 func sectionTitle(th *material.Theme, textValue string) layout.Widget {
 	return func(gtx layout.Context) layout.Dimensions {
 		label := material.Body1(th, textValue)
-		label.Color = color.NRGBA{R: 18, G: 24, B: 34, A: 255}
+		label.Color = color.NRGBA{R: 232, G: 234, B: 237, A: 255}
 		label.Alignment = text.Start
 		return label.Layout(gtx)
 	}
@@ -1015,7 +1218,7 @@ func sectionTitle(th *material.Theme, textValue string) layout.Widget {
 func muted(th *material.Theme, textValue string) layout.Widget {
 	return func(gtx layout.Context) layout.Dimensions {
 		label := material.Caption(th, textValue)
-		label.Color = color.NRGBA{R: 94, G: 102, B: 118, A: 255}
+		label.Color = color.NRGBA{R: 143, G: 149, B: 160, A: 255}
 		return label.Layout(gtx)
 	}
 }
@@ -1058,7 +1261,7 @@ func logoMark(th *material.Theme) layout.Widget {
 		gtx.Constraints.Min.Y = size
 		gtx.Constraints.Max.X = size
 		gtx.Constraints.Max.Y = size
-		paint.FillShape(gtx.Ops, color.NRGBA{R: 32, G: 95, B: 168, A: 255}, clip.Rect{Max: gtx.Constraints.Max}.Op())
+		paint.FillShape(gtx.Ops, color.NRGBA{R: 74, G: 111, B: 165, A: 255}, clip.Rect{Max: gtx.Constraints.Max}.Op())
 		return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			label := material.Body1(th, "O")
 			label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
@@ -1071,13 +1274,44 @@ func tabButton(th *material.Theme, click *widget.Clickable, label string, active
 	return func(gtx layout.Context) layout.Dimensions {
 		btn := material.Button(th, click, label)
 		if active {
-			btn.Background = color.NRGBA{R: 36, G: 88, B: 150, A: 255}
+			btn.Background = color.NRGBA{R: 74, G: 111, B: 165, A: 255}
 		} else {
-			btn.Background = color.NRGBA{R: 226, G: 231, B: 238, A: 255}
-			btn.Color = color.NRGBA{R: 46, G: 54, B: 67, A: 255}
+			btn.Background = color.NRGBA{R: 35, G: 37, B: 43, A: 255}
+			btn.Color = color.NRGBA{R: 189, G: 194, B: 203, A: 255}
 		}
 		return btn.Layout(gtx)
 	}
+}
+
+func modeButton(th *material.Theme, click *widget.Clickable, label string, active bool) layout.Widget {
+	return func(gtx layout.Context) layout.Dimensions {
+		btn := material.Button(th, click, label)
+		if active {
+			btn.Background = color.NRGBA{R: 74, G: 111, B: 165, A: 255}
+			btn.Color = color.NRGBA{R: 247, G: 249, B: 252, A: 255}
+		} else {
+			btn.Background = color.NRGBA{R: 35, G: 37, B: 43, A: 255}
+			btn.Color = color.NRGBA{R: 189, G: 194, B: 203, A: 255}
+		}
+		return btn.Layout(gtx)
+	}
+}
+
+func serverSubtitle(server model.Server) string {
+	if server.MachineType == model.MachineTypeWindows || server.Mode == model.ConnectionModeRelayAgent {
+		code := strings.TrimSpace(server.MachineCode)
+		if code == "" {
+			code = server.Host
+		}
+		if code == "" {
+			return "Windows relay"
+		}
+		return "Windows relay - " + code
+	}
+	if strings.TrimSpace(server.Host) == "" {
+		return "Linux SSH"
+	}
+	return "Linux SSH - " + server.Host
 }
 
 func terminalTabButton(th *material.Theme, click *widget.Clickable, label string, active bool) layout.Widget {

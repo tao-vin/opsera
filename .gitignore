@@ -1,4 +1,5 @@
 *.exe
+*.exe~
 *.dll
 *.so
 *.dylib
@@ -14,6 +15,9 @@ bin/
 !skills/opsera/bin/
 !skills/opsera/bin/.gitkeep
 .gocache/
+
+relay-config.json
+identity.json
 
 .idea/
 .vscode/
