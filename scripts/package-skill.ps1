@@ -1,3 +1,7 @@
+param(
+  [switch]$UseUPX
+)
+
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -24,7 +28,10 @@ try {
   }
   & $go build -trimpath -ldflags "-s -w -H windowsgui" -o $exePath .\cmd\opsera
   $upx = Get-Command upx.exe -ErrorAction SilentlyContinue
-  if ($upx) {
+  if ($UseUPX) {
+    if (-not $upx) {
+      throw 'UPX requested but upx.exe was not found in PATH.'
+    }
     & $upx.Source --best --lzma $exePath
   }
 } finally {
