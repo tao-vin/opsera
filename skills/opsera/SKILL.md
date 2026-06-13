@@ -1,38 +1,84 @@
 ---
 name: opsera
-description: Use the bundled Opsera executable as the Xshell replacement for VPN-launched sessions. Use when an agent needs to run commands or upload/download files through a current VPN-created .xsh local SSH tunnel. The bundled exe works as both GUI and CLI.
+description: Use the bundled Opsera executable for agent SSH operations through saved Opsera servers or live DASUSM/USMSSO-launched Xshell sessions. Use when an agent needs to run commands or transfer files after a VPN/SSO login, especially when XshellCore.exe is already connected. Prefer `command run --sso` for DASUSM/USMSSO/XshellCore sessions; use .xsh only as a legacy fallback.
 ---
 
 # Opsera
 
-Opsera is self-contained in this skill directory.
+Opsera is the agent-facing SSH tool. It gives agents a CLI/API path instead of driving Xshell UI.
 
 Source and downloads:
 
 - GitHub: https://github.com/tao-vin/opsera
 - Releases / latest exe: https://github.com/tao-vin/opsera/releases
 
-Executable:
+## Resolve Executable
+
+Use the bundled exe from this skill. Do not use `ssh-remote-ops`, Xshell automation, or external install paths.
 
 ```powershell
 $opsera = Join-Path $env:CODEX_HOME "skills\opsera\bin\opsera.exe"
+if (-not $env:CODEX_HOME -or -not (Test-Path $opsera)) {
+  $opsera = "C:\Users\Administrator\.codex\skills\opsera\bin\opsera.exe"
+}
 ```
 
-If `CODEX_HOME` is not set, resolve this skill directory first, then use `bin\opsera.exe` under it.
+## Primary: DASUSM/USMSSO XshellCore Attach
 
-## Modes
+When the user has already launched the VPN/SSO entry and Xshell is open, run commands with `--sso`.
 
-- No args opens the GUI.
-- `command` and `file` args run CLI mode for agents.
-- CLI mode writes events to `%LOCALAPPDATA%\Opsera\events`; GUI shows those command/upload/download events.
+```powershell
+& $opsera sso attach
+& $opsera command run --sso "hostname && whoami"
+```
 
-## Command
+`sso attach` starts a local SSO agent on `127.0.0.1:18742`, opens one SSH connection while the Xshell token is fresh, and keeps that SSH connection alive. Later `command run --sso`, `file upload --sso`, `file download --sso`, and `file upload-large --sso` reuse the agent connection first; only if the agent is unavailable do they fall back to a one-shot Xshell URL connection. The agent also watches for new Xshell process command lines and auto-attaches when the Xshell URL changes.
+
+The SSO agent attaches to live Xshell process command lines and extracts `ssh://user:password@host:port` URLs. It prefers the launcher `Xshell.exe -url ...` value, then tries `XshellCore.exe -url ...`, because some SSO launchers pass different credentials to those two processes. Keep the official Xshell window running until `sso attach` has succeeded. After attach, the SSH connection can usually survive Xshell token expiry as long as the server does not force-close existing sessions.
+
+If it fails, do not spend time trying random SSH/Xshell methods. First inspect whether XshellCore is alive:
+
+```powershell
+Get-CimInstance Win32_Process |
+  Where-Object { $_.Name -match 'Xshell|XshellCore|cusmsso|usmsso' } |
+  ForEach-Object { '---'; $_.Name; $_.ExecutablePath; $_.CommandLine }
+```
+
+If no `Xshell.exe` or `XshellCore.exe` command line contains `ssh://`, ask the user to launch the SSO/VPN entry again and retry immediately.
+
+On Windows systems where `Win32_Process.CommandLine` is access-denied from the normal agent process, rerun the Opsera command from an elevated/approved shell. Do not fall back to the DASUSM log `SSOToken`; that token is not the SSH password.
+
+## Saved Opsera Server
+
+For servers saved inside Opsera, use `--server`:
+
+```powershell
+& $opsera command run --server fei "hostname && whoami"
+```
+
+## Legacy Xshell Session File
+
+Use `.xsh` only when there is no DASUSM/USMSSO live XshellCore session:
 
 ```powershell
 & $opsera command run --xsh "<path.xsh>" "hostname && whoami"
 ```
 
 ## Upload
+
+For live DASUSM/USMSSO Xshell sessions:
+
+```powershell
+& $opsera file upload --sso "D:\local\file.txt" "/root/file.txt"
+```
+
+For saved Opsera servers:
+
+```powershell
+& $opsera file upload --server fei "D:\local\file.txt" "/root/file.txt"
+```
+
+For legacy `.xsh` sessions:
 
 ```powershell
 & $opsera file upload --xsh "<path.xsh>" "D:\local\file.txt" "/root/file.txt"
@@ -43,20 +89,22 @@ If `CODEX_HOME` is not set, resolve this skill directory first, then use `bin\op
 Use this for large files. It uploads resumable chunks, keeps SSH alive, merges remotely, and verifies sha256.
 
 ```powershell
+& $opsera file upload-large --sso --chunk-mb 512 "D:\local\big.dat" "/root/big.dat"
 & $opsera file upload-large --xsh "<path.xsh>" --chunk-mb 512 "D:\local\big.dat" "/root/big.dat"
 ```
 
 ## Download
 
 ```powershell
+& $opsera file download --sso "/root/file.txt" "D:\local\file.txt"
 & $opsera file download --xsh "<path.xsh>" "/root/file.txt" "D:\local\file.txt"
 ```
 
 ## Rules
 
+- Prefer `command run --sso` for DASUSM/USMSSO-launched Xshell sessions.
 - Use the bundled `bin\opsera.exe`; do not depend on external install directories.
 - Use CLI mode, not HTTP, for agent operations.
-- Do not call Xshell directly.
-- Use `.xsh` fields `Host`, `Port`, `UserName`, and encrypted session password as parsed by Opsera.
-- If the `.xsh` tunnel port is closed, ask the user to launch the VPN entry again and rerun immediately.
-- Do not expose passwords.
+- Do not call Xshell directly and do not use `ssh-remote-ops`.
+- Do not expose passwords or print full XshellCore URLs unless debugging connection setup.
+- If `--sso` fails because no live Xshell URL is present or the agent cannot reconnect, ask the user to launch the SSO/VPN entry again and rerun `sso attach` immediately.

@@ -14,7 +14,7 @@ func LaunchTarget(args []string) string {
 		if arg == "" {
 			continue
 		}
-		if arg == "--target" || arg == "-target" || arg == "/target" {
+		if isTargetFlag(arg) {
 			if i+1 < len(args) {
 				return normalizeTarget(args[i+1])
 			}
@@ -26,11 +26,65 @@ func LaunchTarget(args []string) string {
 		if strings.HasPrefix(arg, "opsera://") {
 			return normalizeTarget(strings.TrimPrefix(arg, "opsera://"))
 		}
+	}
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if strings.EqualFold(arg, "-newtab") || strings.EqualFold(arg, "/newtab") {
+			if i+1 < len(args) {
+				return normalizeTarget(args[i+1])
+			}
+			return ""
+		}
+	}
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if strings.EqualFold(arg, "-url") || strings.EqualFold(arg, "/url") {
+			if i+1 < len(args) {
+				return normalizeTarget(args[i+1])
+			}
+			return ""
+		}
+	}
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if arg == "" {
+			continue
+		}
+		if isIgnoredLaunchArg(arg) {
+			return ""
+		}
+		if isXshellValueFlag(arg) {
+			i++
+			continue
+		}
 		if !strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "/") {
 			return normalizeTarget(arg)
 		}
 	}
 	return ""
+}
+
+func isTargetFlag(arg string) bool {
+	return arg == "--target" || arg == "-target" || arg == "/target"
+}
+
+func isXshellValueFlag(arg string) bool {
+	return strings.EqualFold(arg, "-url") ||
+		strings.EqualFold(arg, "/url") ||
+		strings.EqualFold(arg, "-newtab") ||
+		strings.EqualFold(arg, "/newtab") ||
+		strings.EqualFold(arg, "-setviewer") ||
+		strings.EqualFold(arg, "/setviewer")
+}
+
+func isIgnoredLaunchArg(arg string) bool {
+	arg = strings.ToLower(strings.TrimSpace(arg))
+	switch arg {
+	case "help", "--help", "-h", "/h", "/?", "version", "--version", "-version", "/version":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeTarget(value string) string {
