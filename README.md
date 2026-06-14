@@ -182,6 +182,40 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\package-skill.ps1
 
 The script copies `opsera.exe` into `skills/opsera/bin/` and writes `D:\release\opsera-skill.zip`.
 
+By default the package script does not use UPX. Packed unsigned executables are more likely to trigger antivirus or PUA
+false positives. Use `-UseUPX` only for a size-constrained internal build that you have tested.
+
+For public Windows releases, sign the executable before the skill zip is created:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\package-skill.ps1 -Sign
+```
+
+`-Sign` auto-detects `signtool.exe` and signs with the best matching certificate from the current user's certificate
+store. You can also pass a certificate thumbprint or PFX file:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\package-skill.ps1 `
+  -Sign `
+  -CertificateThumbprint "<sha1-thumbprint>"
+
+powershell.exe -ExecutionPolicy Bypass -File scripts\package-skill.ps1 `
+  -Sign `
+  -CertificateFile "D:\certs\opsera-code-signing.pfx" `
+  -CertificatePassword "<pfx-password>"
+```
+
+For Microsoft Trusted Signing / Artifact Signing:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\package-skill.ps1 `
+  -Sign `
+  -TrustedSigningDlib "C:\path\to\Azure.CodeSigning.dll" `
+  -TrustedSigningMetadata "C:\path\to\metadata.json"
+```
+
+The script verifies the Authenticode signature after signing. Sign first, then zip; do not sign only the zip.
+
 ## Disclaimer
 
 Opsera can execute commands and transfer files on remote servers.
