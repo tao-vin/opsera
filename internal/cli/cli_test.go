@@ -1,6 +1,11 @@
 package cli
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/tao-vin/opsera/internal/xsh"
+)
 
 func TestTryRunHandlesHelpAndVersion(t *testing.T) {
 	for _, args := range [][]string{{"help"}, {"--help"}, {"version"}, {"--version"}} {
@@ -35,12 +40,17 @@ func TestSessionFromSSHURLInTextParsesXshellCoreCommandLine(t *testing.T) {
 	}
 }
 
-func TestSessionsFromXshellProcessesPrefersLauncherURL(t *testing.T) {
+func TestSessionsFromXshellProcessesPrefersNewestCoreURL(t *testing.T) {
 	processes := []xshellProcessSnapshot{
 		{
 			ProcessID:   20,
 			Name:        "XshellCore.exe",
-			CommandLine: `"C:\XshellCore.exe" -url "ssh://user:core-token@203.0.113.10:60022" -newtab "10.0.0.9:22"`,
+			CommandLine: `"C:\XshellCore.exe" -url "ssh://user:old-core-token@203.0.113.10:60022" -newtab "10.0.0.9:22"`,
+		},
+		{
+			ProcessID:   30,
+			Name:        "XshellCore.exe",
+			CommandLine: `"C:\XshellCore.exe" -url "ssh://user:new-core-token@203.0.113.10:60022" -newtab "10.0.0.9:22"`,
 		},
 		{
 			ProcessID:   10,
@@ -50,14 +60,39 @@ func TestSessionsFromXshellProcessesPrefersLauncherURL(t *testing.T) {
 	}
 
 	sessions := sessionsFromXshellProcesses(processes)
-	if len(sessions) != 2 {
+	if len(sessions) != 3 {
 		t.Fatalf("len(sessions) = %d", len(sessions))
 	}
-	if sessions[0].Password != "launcher-token" {
-		t.Fatalf("first session should come from Xshell.exe launcher URL")
+	if sessions[0].Password != "new-core-token" {
+		t.Fatalf("first session should come from newest XshellCore.exe URL")
 	}
-	if sessions[1].Password != "core-token" {
-		t.Fatalf("second session should come from XshellCore.exe URL")
+	if sessions[1].Password != "old-core-token" {
+		t.Fatalf("second session should come from older XshellCore.exe URL")
+	}
+	if sessions[2].Password != "launcher-token" {
+		t.Fatalf("launcher URL should be fallback after XshellCore.exe URLs")
+	}
+}
+
+func TestDASUSMPoolBlocksFailedSessionTemporarily(t *testing.T) {
+	pool := NewDASUSMPool(nil)
+	session := xsh.Session{
+		Host:     "203.0.113.10",
+		Port:     60022,
+		UserName: "user",
+		Password: "expired-token",
+	}
+
+	if pool.sessionBlocked(session) {
+		t.Fatal("fresh session should not be blocked")
+	}
+	pool.markSessionFailed(session)
+	if !pool.sessionBlocked(session) {
+		t.Fatal("failed session should be blocked")
+	}
+	pool.failed[sessionCacheKey(session)] = time.Now().Add(-11 * time.Minute)
+	if pool.sessionBlocked(session) {
+		t.Fatal("expired block should be cleared")
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -565,10 +566,11 @@ type DASUSMPool struct {
 	client      *ssh.Client
 	session     xsh.Session
 	connectedAt time.Time
+	failed      map[string]time.Time
 }
 
 func NewDASUSMPool(logStore *logs.Store) *DASUSMPool {
-	return &DASUSMPool{logs: logStore}
+	return &DASUSMPool{logs: logStore, failed: map[string]time.Time{}}
 }
 
 func (p *DASUSMPool) Connected() bool {
@@ -657,8 +659,12 @@ func (p *DASUSMPool) clientForUse() (*ssh.Client, error) {
 	}
 	failures := []string{}
 	for _, session := range sessions {
+		if p.sessionBlocked(session) {
+			continue
+		}
 		client, err := dialSession(session)
 		if err != nil {
+			p.markSessionFailed(session)
 			failures = append(failures, sessionFailure(session, err))
 			continue
 		}
@@ -670,7 +676,33 @@ func (p *DASUSMPool) clientForUse() (*ssh.Client, error) {
 		}
 		return client, nil
 	}
+	if len(failures) == 0 {
+		return nil, errors.New("all failed Xshell SSH URLs are cooling down; reopen Xshell from SSO or wait for a new XshellCore URL")
+	}
 	return nil, errors.New("all live Xshell SSH URLs failed: " + strings.Join(failures, "; "))
+}
+
+func (p *DASUSMPool) sessionBlocked(session xsh.Session) bool {
+	if len(p.failed) == 0 {
+		return false
+	}
+	key := sessionCacheKey(session)
+	failedAt, ok := p.failed[key]
+	if !ok {
+		return false
+	}
+	if time.Since(failedAt) > 10*time.Minute {
+		delete(p.failed, key)
+		return false
+	}
+	return true
+}
+
+func (p *DASUSMPool) markSessionFailed(session xsh.Session) {
+	if p.failed == nil {
+		p.failed = map[string]time.Time{}
+	}
+	p.failed[sessionCacheKey(session)] = time.Now()
 }
 
 func (p *DASUSMPool) drop() {
@@ -755,26 +787,49 @@ func parseXshellProcessSnapshots(data []byte) ([]xshellProcessSnapshot, error) {
 }
 
 func sessionsFromXshellProcesses(processes []xshellProcessSnapshot) []xsh.Session {
+	sort.SliceStable(processes, func(i, j int) bool {
+		leftPriority := xshellProcessPriority(processes[i].Name)
+		rightPriority := xshellProcessPriority(processes[j].Name)
+		if leftPriority != rightPriority {
+			return leftPriority < rightPriority
+		}
+		return processes[i].ProcessID > processes[j].ProcessID
+	})
+
 	sessions := []xsh.Session{}
 	seen := map[string]bool{}
-	for _, wanted := range []string{"Xshell.exe", "XshellCore.exe"} {
-		for _, process := range processes {
-			if !strings.EqualFold(strings.TrimSpace(process.Name), wanted) {
-				continue
-			}
-			session, err := sessionFromSSHURLInText(process.CommandLine)
-			if err != nil {
-				continue
-			}
-			key := fmt.Sprintf("%s\x00%d\x00%s\x00%s", session.Host, session.Port, session.UserName, session.Password)
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			sessions = append(sessions, session)
+	for _, process := range processes {
+		name := strings.TrimSpace(process.Name)
+		if !strings.EqualFold(name, "XshellCore.exe") && !strings.EqualFold(name, "Xshell.exe") {
+			continue
 		}
+		session, err := sessionFromSSHURLInText(process.CommandLine)
+		if err != nil {
+			continue
+		}
+		key := sessionCacheKey(session)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		sessions = append(sessions, session)
 	}
 	return sessions
+}
+
+func xshellProcessPriority(name string) int {
+	if strings.EqualFold(strings.TrimSpace(name), "XshellCore.exe") {
+		return 0
+	}
+	if strings.EqualFold(strings.TrimSpace(name), "Xshell.exe") {
+		return 1
+	}
+	return 2
+}
+
+func sessionCacheKey(session xsh.Session) string {
+	sum := sha256.Sum256([]byte(session.Password))
+	return fmt.Sprintf("%s\x00%d\x00%s\x00%s", session.Host, session.Port, session.UserName, hex.EncodeToString(sum[:]))
 }
 
 func sessionFailure(session xsh.Session, err error) string {
@@ -1482,8 +1537,14 @@ func downloadWithClient(client *ssh.Client, remotePath, localPath string) error 
 
 func tryDASUSMSessions(sessions []xsh.Session, run func(xsh.Session) error) error {
 	failures := []string{}
+	failed := map[string]bool{}
 	for _, session := range sessions {
+		key := sessionCacheKey(session)
+		if failed[key] {
+			continue
+		}
 		if err := run(session); err != nil {
+			failed[key] = true
 			failures = append(failures, sessionFailure(session, err))
 			continue
 		}
