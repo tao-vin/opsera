@@ -178,8 +178,8 @@ func cliUsage() string {
 	return strings.Join([]string{
 		"usage:",
 		"  opsera command run [--server <name|host|id>] [--xsh <path>] [--sso] <shell-command>",
-		"  opsera sso attach",
-		"  opsera sso agent",
+		"  opsera sso attach [--core-only]",
+		"  opsera sso agent [--core-only]",
 		"  opsera file upload [--server <name|host|id>] [--xsh <path>] [--sso] <local> <remote>",
 		"  opsera file upload-large [--xsh <path>] [--sso] [--chunk-mb 512] <local> <remote>",
 		"  opsera file download [--xsh <path>] [--sso] <remote> <local>",
@@ -188,12 +188,23 @@ func cliUsage() string {
 
 func runSSO(args []string) (bool, error) {
 	if len(args) == 0 {
-		return true, errors.New("usage: opsera sso attach|agent")
+		return true, errors.New("usage: opsera sso attach|agent [--core-only]")
 	}
 	switch args[0] {
 	case "agent":
-		return true, runSSOAgent()
+		opts, err := parseSSOOptions(args[1:])
+		if err != nil {
+			return true, err
+		}
+		return true, runSSOAgent(opts)
 	case "attach":
+		opts, err := parseSSOOptions(args[1:])
+		if err != nil {
+			return true, err
+		}
+		if opts.CoreOnly {
+			_ = os.Setenv("OPSERA_SSO_CORE_ONLY", "1")
+		}
 		result, handled, err := callSSOAgent("POST", "/sso/attach", nil, 10*time.Second)
 		if !handled {
 			return true, err
@@ -204,11 +215,28 @@ func runSSO(args []string) (bool, error) {
 		}
 		return true, writeJSON(result)
 	default:
-		return true, errors.New("usage: opsera sso attach|agent")
+		return true, errors.New("usage: opsera sso attach|agent [--core-only]")
 	}
 }
 
-func runSSOAgent() error {
+type ssoOptions struct {
+	CoreOnly bool
+}
+
+func parseSSOOptions(args []string) (ssoOptions, error) {
+	opts := ssoOptions{}
+	for _, arg := range args {
+		switch arg {
+		case "--core-only":
+			opts.CoreOnly = true
+		default:
+			return opts, fmt.Errorf("unknown sso option: %s", arg)
+		}
+	}
+	return opts, nil
+}
+
+func runSSOAgent(opts ssoOptions) error {
 	dataDir, err := resolveDataDir()
 	if err != nil {
 		return err
@@ -218,6 +246,7 @@ func runSSOAgent() error {
 		return err
 	}
 	pool := NewDASUSMPool(logStore)
+	pool.coreOnly = opts.CoreOnly || envBool("OPSERA_SSO_CORE_ONLY")
 	go autoAttachDASUSM(pool, logStore)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -422,6 +451,9 @@ func ensureSSOAgent() error {
 		return err
 	}
 	cmd := exec.Command(exe, "sso", "agent")
+	if envBool("OPSERA_SSO_CORE_ONLY") {
+		cmd.Env = append(os.Environ(), "OPSERA_SSO_CORE_ONLY=1")
+	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -567,6 +599,7 @@ type DASUSMPool struct {
 	session     xsh.Session
 	connectedAt time.Time
 	failed      map[string]time.Time
+	coreOnly    bool
 }
 
 func NewDASUSMPool(logStore *logs.Store) *DASUSMPool {
@@ -653,7 +686,7 @@ func (p *DASUSMPool) clientForUse() (*ssh.Client, error) {
 		_ = p.client.Close()
 		p.client = nil
 	}
-	sessions, err := LatestDASUSMSessions()
+	sessions, err := latestDASUSMSessions(p.coreOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -737,11 +770,15 @@ func LatestDASUSMSession() (xsh.Session, error) {
 }
 
 func LatestDASUSMSessions() ([]xsh.Session, error) {
+	return latestDASUSMSessions(envBool("OPSERA_SSO_CORE_ONLY"))
+}
+
+func latestDASUSMSessions(coreOnly bool) ([]xsh.Session, error) {
 	processes, err := latestXshellProcessSnapshots()
 	if err != nil {
 		return nil, err
 	}
-	sessions := sessionsFromXshellProcesses(processes)
+	sessions := sessionsFromXshellProcesses(processes, coreOnly)
 	if len(sessions) == 0 {
 		return nil, errors.New("no live Xshell SSH URL found")
 	}
@@ -786,7 +823,7 @@ func parseXshellProcessSnapshots(data []byte) ([]xshellProcessSnapshot, error) {
 	return []xshellProcessSnapshot{process}, nil
 }
 
-func sessionsFromXshellProcesses(processes []xshellProcessSnapshot) []xsh.Session {
+func sessionsFromXshellProcesses(processes []xshellProcessSnapshot, coreOnly bool) []xsh.Session {
 	sort.SliceStable(processes, func(i, j int) bool {
 		leftPriority := xshellProcessPriority(processes[i].Name)
 		rightPriority := xshellProcessPriority(processes[j].Name)
@@ -800,7 +837,11 @@ func sessionsFromXshellProcesses(processes []xshellProcessSnapshot) []xsh.Sessio
 	seen := map[string]bool{}
 	for _, process := range processes {
 		name := strings.TrimSpace(process.Name)
-		if !strings.EqualFold(name, "XshellCore.exe") && !strings.EqualFold(name, "Xshell.exe") {
+		isCore := strings.EqualFold(name, "XshellCore.exe")
+		if coreOnly && !isCore {
+			continue
+		}
+		if !isCore && !strings.EqualFold(name, "Xshell.exe") {
 			continue
 		}
 		session, err := sessionFromSSHURLInText(process.CommandLine)
@@ -832,6 +873,11 @@ func sessionCacheKey(session xsh.Session) string {
 	return fmt.Sprintf("%s\x00%d\x00%s\x00%s", session.Host, session.Port, session.UserName, hex.EncodeToString(sum[:]))
 }
 
+func envBool(name string) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
 func sessionFailure(session xsh.Session, err error) string {
 	user := strings.TrimSpace(session.UserName)
 	if user == "" {
@@ -857,7 +903,7 @@ func latestXshellCoreSessionsFromLines(lines []string) []xsh.Session {
 			CommandLine: line,
 		})
 	}
-	return sessionsFromXshellProcesses(processes)
+	return sessionsFromXshellProcesses(processes, false)
 }
 
 func latestXshellCoreSessionFromLines(lines []string) (xsh.Session, error) {

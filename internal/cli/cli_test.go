@@ -59,7 +59,7 @@ func TestSessionsFromXshellProcessesPrefersNewestCoreURL(t *testing.T) {
 		},
 	}
 
-	sessions := sessionsFromXshellProcesses(processes)
+	sessions := sessionsFromXshellProcesses(processes, false)
 	if len(sessions) != 3 {
 		t.Fatalf("len(sessions) = %d", len(sessions))
 	}
@@ -71,6 +71,14 @@ func TestSessionsFromXshellProcessesPrefersNewestCoreURL(t *testing.T) {
 	}
 	if sessions[2].Password != "launcher-token" {
 		t.Fatalf("launcher URL should be fallback after XshellCore.exe URLs")
+	}
+
+	coreOnly := sessionsFromXshellProcesses(processes, true)
+	if len(coreOnly) != 2 {
+		t.Fatalf("len(coreOnly) = %d", len(coreOnly))
+	}
+	if coreOnly[0].Password != "new-core-token" || coreOnly[1].Password != "old-core-token" {
+		t.Fatalf("core-only sessions should contain only XshellCore URLs in newest-first order")
 	}
 }
 

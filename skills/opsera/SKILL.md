@@ -34,7 +34,15 @@ When the user has already launched the VPN/SSO entry and Xshell is open, run com
 
 `sso attach` starts a local SSO agent on `127.0.0.1:18742`, opens one SSH connection while the Xshell token is fresh, and keeps that SSH connection alive. Later `command run --sso`, `file upload --sso`, `file download --sso`, and `file upload-large --sso` reuse the agent connection first; only if the agent is unavailable do they fall back to a one-shot Xshell URL connection. The agent also watches for new Xshell process command lines and auto-attaches when the Xshell URL changes.
 
-The SSO agent attaches to live Xshell process command lines and extracts `ssh://user:password@host:port` URLs. It prefers the launcher `Xshell.exe -url ...` value, then tries `XshellCore.exe -url ...`, because some SSO launchers pass different credentials to those two processes. Keep the official Xshell window running until `sso attach` has succeeded. After attach, the SSH connection can usually survive Xshell token expiry as long as the server does not force-close existing sessions.
+The SSO agent attaches to live Xshell process command lines and extracts `ssh://user:password@host:port` URLs. It prefers the newest official `XshellCore.exe -url ...` value, then falls back to `Xshell.exe -url ...`. Failed SSH URLs are cooled down during the agent lifetime so an expired token is not retried repeatedly. Keep the official Xshell window running until `sso attach` has succeeded. After attach, the SSH connection can usually survive Xshell token expiry as long as the server does not force-close existing sessions.
+
+If a stale `Xshell.exe` launcher URL keeps winning in a specific environment, run the agent in Core-only mode. This keeps all existing behavior but ignores `Xshell.exe` process URLs and uses only official `XshellCore.exe` URLs:
+
+```powershell
+$env:OPSERA_SSO_CORE_ONLY = "1"
+& $opsera sso attach --core-only
+& $opsera command run --sso "hostname && whoami"
+```
 
 If it fails, do not spend time trying random SSH/Xshell methods. First inspect whether XshellCore is alive:
 
