@@ -548,7 +548,17 @@ func keepXshellWindowActive(logStore *logs.Store, interval time.Duration, comman
 func sendCommandToXshellWindow(command string) error {
 	escapedCommand := strings.ReplaceAll(command, "'", "''")
 	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class OpseraWin32 {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
+}
+"@
 $ws = New-Object -ComObject WScript.Shell
+$previous = [OpseraWin32]::GetForegroundWindow()
 $process = Get-Process XshellCore,Xshell -ErrorAction SilentlyContinue |
   Where-Object { $_.MainWindowHandle -ne 0 } |
   Sort-Object @{Expression={ if ($_.ProcessName -eq 'XshellCore') { 0 } else { 1 } }}, Id -Descending |
@@ -557,6 +567,10 @@ if ($null -eq $process) { throw 'no visible Xshell window found' }
 if (-not $ws.AppActivate($process.Id)) { throw 'could not activate Xshell window' }
 Start-Sleep -Milliseconds 200
 $ws.SendKeys('%s{ENTER}')
+Start-Sleep -Milliseconds 100
+if ($previous -ne [IntPtr]::Zero -and $previous -ne $process.MainWindowHandle -and [OpseraWin32]::IsWindow($previous)) {
+  [void][OpseraWin32]::SetForegroundWindow($previous)
+}
 `, escapedCommand)
 	out, err := exec.Command("powershell.exe", "-NoProfile", "-STA", "-Command", script).CombinedOutput()
 	if err != nil {
