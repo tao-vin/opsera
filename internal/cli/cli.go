@@ -178,8 +178,8 @@ func cliUsage() string {
 	return strings.Join([]string{
 		"usage:",
 		"  opsera command run [--server <name|host|id>] [--xsh <path>] [--sso] <shell-command>",
-		"  opsera sso attach [--core-only]",
-		"  opsera sso agent [--core-only]",
+		"  opsera sso attach [--core-only] [--window-keepalive]",
+		"  opsera sso agent [--core-only] [--window-keepalive]",
 		"  opsera file upload [--server <name|host|id>] [--xsh <path>] [--sso] <local> <remote>",
 		"  opsera file upload-large [--xsh <path>] [--sso] [--chunk-mb 512] <local> <remote>",
 		"  opsera file download [--xsh <path>] [--sso] <remote> <local>",
@@ -205,6 +205,9 @@ func runSSO(args []string) (bool, error) {
 		if opts.CoreOnly {
 			_ = os.Setenv("OPSERA_SSO_CORE_ONLY", "1")
 		}
+		if opts.WindowKeepAlive {
+			_ = os.Setenv("OPSERA_XSHELL_WINDOW_KEEPALIVE", "1")
+		}
 		result, handled, err := callSSOAgent("POST", "/sso/attach", nil, 10*time.Second)
 		if !handled {
 			return true, err
@@ -220,7 +223,8 @@ func runSSO(args []string) (bool, error) {
 }
 
 type ssoOptions struct {
-	CoreOnly bool
+	CoreOnly        bool
+	WindowKeepAlive bool
 }
 
 func parseSSOOptions(args []string) (ssoOptions, error) {
@@ -229,6 +233,8 @@ func parseSSOOptions(args []string) (ssoOptions, error) {
 		switch arg {
 		case "--core-only":
 			opts.CoreOnly = true
+		case "--window-keepalive":
+			opts.WindowKeepAlive = true
 		default:
 			return opts, fmt.Errorf("unknown sso option: %s", arg)
 		}
@@ -248,6 +254,9 @@ func runSSOAgent(opts ssoOptions) error {
 	pool := NewDASUSMPool(logStore)
 	pool.coreOnly = opts.CoreOnly || envBool("OPSERA_SSO_CORE_ONLY")
 	go autoAttachDASUSM(pool, logStore)
+	if opts.WindowKeepAlive || envBool("OPSERA_XSHELL_WINDOW_KEEPALIVE") {
+		go keepXshellWindowActive(logStore, time.Minute, "ls")
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -451,9 +460,14 @@ func ensureSSOAgent() error {
 		return err
 	}
 	cmd := exec.Command(exe, "sso", "agent")
+	env := os.Environ()
 	if envBool("OPSERA_SSO_CORE_ONLY") {
-		cmd.Env = append(os.Environ(), "OPSERA_SSO_CORE_ONLY=1")
+		env = append(env, "OPSERA_SSO_CORE_ONLY=1")
 	}
+	if envBool("OPSERA_XSHELL_WINDOW_KEEPALIVE") {
+		env = append(env, "OPSERA_XSHELL_WINDOW_KEEPALIVE=1")
+	}
+	cmd.Env = env
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -507,6 +521,52 @@ func autoAttachDASUSM(pool *DASUSMPool, logStore *logs.Store) {
 			_ = logStore.Append(model.LogLevelInfo, "sso", "auto attach ready", "")
 		}
 	}
+}
+
+func keepXshellWindowActive(logStore *logs.Store, interval time.Duration, command string) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	command = strings.TrimSpace(command)
+	if command == "" {
+		command = "ls"
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	lastErrorLog := time.Time{}
+	for {
+		if err := sendCommandToXshellWindow(command); err != nil {
+			if logStore != nil && time.Since(lastErrorLog) > time.Minute {
+				_ = logStore.Append(model.LogLevelWarn, "sso", "xshell window keepalive failed: "+err.Error(), "")
+				lastErrorLog = time.Now()
+			}
+		}
+		<-ticker.C
+	}
+}
+
+func sendCommandToXshellWindow(command string) error {
+	escapedCommand := strings.ReplaceAll(command, "'", "''")
+	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+$ws = New-Object -ComObject WScript.Shell
+$process = Get-Process XshellCore,Xshell -ErrorAction SilentlyContinue |
+  Where-Object { $_.MainWindowHandle -ne 0 } |
+  Sort-Object @{Expression={ if ($_.ProcessName -eq 'XshellCore') { 0 } else { 1 } }}, Id -Descending |
+  Select-Object -First 1
+if ($null -eq $process) { throw 'no visible Xshell window found' }
+if (-not $ws.AppActivate($process.Id)) { throw 'could not activate Xshell window' }
+Start-Sleep -Milliseconds 200
+$ws.SendKeys('%s{ENTER}')
+`, escapedCommand)
+	out, err := exec.Command("powershell.exe", "-NoProfile", "-STA", "-Command", script).CombinedOutput()
+	if err != nil {
+		text := strings.TrimSpace(string(out))
+		if text == "" {
+			text = err.Error()
+		}
+		return errors.New(text)
+	}
+	return nil
 }
 
 func xshellProcessSignature() string {

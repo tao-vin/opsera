@@ -19,6 +19,19 @@ func TestTryRunHandlesHelpAndVersion(t *testing.T) {
 	}
 }
 
+func TestParseSSOOptions(t *testing.T) {
+	opts, err := parseSSOOptions([]string{"--core-only", "--window-keepalive"})
+	if err != nil {
+		t.Fatalf("parseSSOOptions returned error: %v", err)
+	}
+	if !opts.CoreOnly || !opts.WindowKeepAlive {
+		t.Fatalf("unexpected options: %#v", opts)
+	}
+	if _, err := parseSSOOptions([]string{"--bad"}); err == nil {
+		t.Fatal("unknown option should return error")
+	}
+}
+
 func TestSessionFromSSHURLInTextParsesXshellCoreCommandLine(t *testing.T) {
 	line := `"C:\Program Files (x86)\NetSarang\Xshell 7\XshellCore.exe" -setviewer 395718 -authprompt -url "ssh://sso-user:p%2Fss%40word@203.0.113.10:60022" -newtab "10.0.0.9:22"`
 

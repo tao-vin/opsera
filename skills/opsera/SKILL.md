@@ -44,6 +44,13 @@ $env:OPSERA_SSO_CORE_ONLY = "1"
 & $opsera command run --sso "hostname && whoami"
 ```
 
+If the official Xshell window disconnects when idle, enable window keepalive. This brings the visible Xshell/XshellCore window forward once per minute and sends `ls` followed by Enter, so the bastion sees normal terminal activity:
+
+```powershell
+$env:OPSERA_XSHELL_WINDOW_KEEPALIVE = "1"
+& $opsera sso attach --window-keepalive
+```
+
 If it fails, do not spend time trying random SSH/Xshell methods. First inspect whether XshellCore is alive:
 
 ```powershell
