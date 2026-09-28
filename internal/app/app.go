@@ -541,6 +541,7 @@ func newUIState(rt *runtime, window *app.Window) *uiState {
 	ui.notes.SingleLine = false
 	ui.placeholder.SingleLine = true
 	ui.placeholder.ReadOnly = true
+	_ = events.Prune(rt.dataDir, 200)
 	ui.reload()
 	ui.openLatestSessionTab()
 	return ui
@@ -830,7 +831,7 @@ func (ui *uiState) pollEvents() {
 		return
 	}
 	ui.lastEventPoll = time.Now()
-	items, err := events.ReadAll(ui.rt.dataDir)
+	items, err := events.ReadLatest(ui.rt.dataDir, 200)
 	if err != nil {
 		ui.status = err.Error()
 		return
@@ -848,6 +849,7 @@ func (ui *uiState) pollEvents() {
 		}
 		ui.seenEvents[event.ID] = true
 		ui.applyEvent(event)
+		_ = events.Remove(ui.rt.dataDir, event)
 	}
 }
 

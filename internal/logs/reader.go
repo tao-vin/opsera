@@ -21,19 +21,21 @@ func (s *Store) ReadLatest(limit int) ([]model.LogEntry, error) {
 	}
 	defer f.Close()
 
-	var entries []model.LogEntry
+	entries := make([]model.LogEntry, 0, limit)
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		var entry model.LogEntry
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err == nil {
-			entries = append(entries, entry)
+			if len(entries) == limit {
+				copy(entries, entries[1:])
+				entries[len(entries)-1] = entry
+			} else {
+				entries = append(entries, entry)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	if len(entries) <= limit {
-		return entries, nil
-	}
-	return entries[len(entries)-limit:], nil
+	return entries, nil
 }

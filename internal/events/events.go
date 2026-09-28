@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -38,6 +39,13 @@ func Write(root string, event Event) error {
 }
 
 func ReadAll(root string) ([]Event, error) {
+	return ReadLatest(root, 200)
+}
+
+func ReadLatest(root string, limit int) ([]Event, error) {
+	if limit <= 0 {
+		limit = 200
+	}
 	dir := filepath.Join(root, "events")
 	items, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
@@ -46,11 +54,18 @@ func ReadAll(root string) ([]Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := []Event{}
+	files := make([]os.DirEntry, 0, len(items))
 	for _, item := range items {
-		if item.IsDir() || filepath.Ext(item.Name()) != ".json" {
-			continue
+		if !item.IsDir() && filepath.Ext(item.Name()) == ".json" {
+			files = append(files, item)
 		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Name() < files[j].Name() })
+	if len(files) > limit {
+		files = files[len(files)-limit:]
+	}
+	out := make([]Event, 0, len(files))
+	for _, item := range files {
 		raw, err := os.ReadFile(filepath.Join(dir, item.Name()))
 		if err != nil {
 			continue
@@ -61,4 +76,45 @@ func ReadAll(root string) ([]Event, error) {
 		}
 	}
 	return out, nil
+}
+
+func Prune(root string, keep int) error {
+	if keep < 0 {
+		keep = 0
+	}
+	dir := filepath.Join(root, "events")
+	items, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	files := make([]os.DirEntry, 0, len(items))
+	for _, item := range items {
+		if !item.IsDir() && filepath.Ext(item.Name()) == ".json" {
+			files = append(files, item)
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Name() < files[j].Name() })
+	if len(files) <= keep {
+		return nil
+	}
+	for _, item := range files[:len(files)-keep] {
+		if err := os.Remove(filepath.Join(dir, item.Name())); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func Remove(root string, event Event) error {
+	if event.ID == "" {
+		return nil
+	}
+	err := os.Remove(filepath.Join(root, "events", event.ID+".json"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
